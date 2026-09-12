@@ -8,3 +8,6 @@ data/*.json
 
 .DS_Store
 *.log
+
+# local dev-preview tooling config, not part of the app
+frontend/.claude/
