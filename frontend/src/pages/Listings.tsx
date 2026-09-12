@@ -3,6 +3,7 @@ import { usePagedRecords } from "../hooks/usePagedRecords";
 import type { Listing } from "../api/types";
 import { ListingCard } from "../components/ListingCard";
 import { Pagination } from "../components/Pagination";
+import { parsePriceShorthand, formatResolvedPrice } from "../utils/priceInput";
 
 const PAGE_SIZE = 24;
 const LOCALITIES = [
@@ -16,20 +17,28 @@ export function Listings() {
   const [locality, setLocality] = useState("");
   const [bhk, setBhk] = useState("");
   const [propertyType, setPropertyType] = useState("");
-  const [minPrice, setMinPrice] = useState("");
-  const [maxPrice, setMaxPrice] = useState("");
+  const [minPriceInput, setMinPriceInput] = useState("");
+  const [maxPriceInput, setMaxPriceInput] = useState("");
   const [furnishing, setFurnishing] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("posted_at");
   const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
+
+  // Accepts Indian real-estate shorthand ("50L", "1.2cr") as well as plain
+  // rupees - the API's min_price/max_price params only take raw rupee
+  // integers, so whatever's typed has to be resolved before it's sent.
+  const minPrice = useMemo(() => parsePriceShorthand(minPriceInput), [minPriceInput]);
+  const maxPrice = useMemo(() => parsePriceShorthand(maxPriceInput), [maxPriceInput]);
+  const minPriceInvalid = minPriceInput.trim() !== "" && minPrice === undefined;
+  const maxPriceInvalid = maxPriceInput.trim() !== "" && maxPrice === undefined;
 
   const params = useMemo(
     () => ({
       locality: locality || undefined,
       bhk: bhk || undefined,
       property_type: propertyType || undefined,
-      min_price: minPrice || undefined,
-      max_price: maxPrice || undefined,
+      min_price: minPrice,
+      max_price: maxPrice,
       furnishing: furnishing || undefined,
       sort_by: sortKey,
       order: sortOrder,
@@ -96,11 +105,29 @@ export function Listings() {
         </label>
         <label>
           Min price
-          <input type="number" placeholder="₹" value={minPrice} onChange={(e) => updateFilter(setMinPrice)(e.target.value)} />
+          <input
+            type="text"
+            placeholder="e.g. 50L, 1.2cr"
+            value={minPriceInput}
+            onChange={(e) => updateFilter(setMinPriceInput)(e.target.value)}
+            style={minPriceInvalid ? { borderColor: "var(--danger)" } : undefined}
+          />
+          <span className="muted" style={{ fontSize: "0.7rem" }}>
+            {minPriceInvalid ? "Not understood" : minPrice !== undefined ? formatResolvedPrice(minPrice) : " "}
+          </span>
         </label>
         <label>
           Max price
-          <input type="number" placeholder="₹" value={maxPrice} onChange={(e) => updateFilter(setMaxPrice)(e.target.value)} />
+          <input
+            type="text"
+            placeholder="e.g. 1cr, 15000000"
+            value={maxPriceInput}
+            onChange={(e) => updateFilter(setMaxPriceInput)(e.target.value)}
+            style={maxPriceInvalid ? { borderColor: "var(--danger)" } : undefined}
+          />
+          <span className="muted" style={{ fontSize: "0.7rem" }}>
+            {maxPriceInvalid ? "Not understood" : maxPrice !== undefined ? formatResolvedPrice(maxPrice) : " "}
+          </span>
         </label>
         <label>
           Furnishing
