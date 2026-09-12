@@ -1,0 +1,187 @@
+{
+  "api_key": "IVY26-C9AFDB548E11",
+  "candidate": {
+    "name": "Mayukh Panja",
+    "email": "mayukhpanja05@gmail.com",
+    "repo_url": "",
+    "demo_url": ""
+  },
+  "answers": {
+    "total_listing_records": 4700,
+    "unique_properties": 4700,
+    "active_listings": 3722,
+    "corrupt_listing_ids": [
+      "100-1000035", "100-1001077", "100-1001141", "100-1002346", "100-1002442",
+      "100-1002600", "100-1002884", "100-1003117", "DWE-1001165", "DWE-1001183",
+      "DWE-1001909", "DWE-1002892", "DWE-1003673", "MAG-1000179", "MAG-1000885",
+      "MAG-1003269", "MAG-1003510", "SQU-1000394", "SQU-1000979", "SQU-1002298",
+      "SQU-1002843", "SQU-1003177", "SQU-1003370", "ZER-1000430", "ZER-1000500",
+      "ZER-1001207", "ZER-1001249", "ZER-1001334", "ZER-1002632", "ZER-1002667",
+      "ZER-1002911", "ZER-1003426"
+    ],
+    "total_monthly_rent": 6448700,
+    "avg_price_per_sqft_2bhk": 11452.51,
+    "costliest_project": { "project_id": "P10255", "price_max_inr": 48900000 },
+    "listings_last_7_days": 149,
+    "fake_listing_ids": [
+      "DWE-1000934", "MAG-1000452", "MAG-1003078", "MAG-1004552",
+      "SQU-1001894", "SQU-1002491", "ZER-1001070"
+    ],
+    "projects_with_wrong_listing_count": 127
+  },
+  "findings": [
+    {
+      "endpoint": "*",
+      "category": "auth",
+      "documented": "The API key is sent as a query parameter: GET /v1/listings?api_key=IVY26-XXXXXXXXXXXX",
+      "actual": "The query parameter is rejected outright with {\"detail\":\"send your key in the X-API-Key request header, not as a query parameter\"}. Every request must carry the key as an X-API-Key header instead.",
+      "how_found": "Called /v1/listings with ?api_key=... exactly as documented, before writing any other code, and read the 400 response body.",
+      "impact": "Nobody can authenticate a single request by following the docs as written; this had to be reverse-engineered from the error message before any other endpoint could be tested.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/auth/login",
+      "category": "auth",
+      "documented": "Response body is {\"token\": ..., \"token_type\": \"Bearer\", \"expires_in\": 86400, \"user\": {\"email\":..., \"name\":...}}, and \"a single login is enough for one working session\" since there is no refresh flow.",
+      "actual": "The field is named access_token, not token. expires_in is 900 (15 minutes), not 86400. The user object only ever contains email - name is never present. And despite \"there is no refresh flow\", the response also includes a working refresh_token and refresh_url, and POST /auth/refresh (undocumented) successfully mints a new access/refresh pair.",
+      "how_found": "Logged in with curl, inspected the raw JSON body, then waited out the documented mental model and called the refresh_url from the response to confirm it actually works.",
+      "impact": "A frontend built strictly from the docs (reading `token`, expecting 24h sessions, never calling refresh) would silently start failing requests 15 minutes after login - which breaks the assignment's own \"still working thirty minutes after you logged in\" requirement unless you discover and use the undocumented refresh flow.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "pagination",
+      "documented": "Collection responses are shaped {\"total\": ..., \"page\": ..., \"page_size\": ..., \"results\": [...]}, paginated via `page` and `limit` (default 20, max 200).",
+      "actual": "The actual shape is {\"limit\", \"offset\", \"count\", \"total\", \"has_more\", \"results\"} - there is no `page`/`page_size` anywhere. Passing `page=2` is silently ignored (it returns the same records as offset=0); pagination only works via `offset`. Separately, `limit` is capped at 50 server-side no matter what is requested (limit=200 and limit=500 both come back with `\"limit\": 50` and 50 results), not the documented 200.",
+      "how_found": "Fetched page 1 and page 2 with `page=2&limit=2` and got byte-identical results; then paged the same query with `offset=2` and got different, correct results. Confirmed the limit cap by requesting limit=200 and limit=500 and reading back `\"limit\": 50` in the response both times.",
+      "impact": "A client that follows the documented page/page_size contract never advances past the first page and believes it has fetched everything after one request.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "pagination",
+      "documented": "\"total is the exact number of records matching your filters.\"",
+      "actual": "Paging all the way to the end (via offset, until has_more is false) yields 4700 unique listing_ids with no duplicates, while every page's `total` field says 4473 throughout. The same undercount pattern holds for /v1/rentals (total says 1808, 1900 are actually retrievable) and /v1/projects (total says 495, 520 are actually retrievable).",
+      "how_found": "Wrote a script to page to the end with no filters, counted results, and compared against the `total` reported on every page. Also directly probed the boundary: offset=4699 still returns 1 record and offset=4700 returns 0, confirming 4700 is the true count, not an artifact of duplicate pages.",
+      "impact": "Anyone who trusts `total` for Q1/Q5-style \"how many records exist\" questions, or for a UI page-count, undercounts by 5% (listings), 5% (rentals) or 5% (projects) - the true retrievable counts only show up by actually paging to the end.",
+      "evidence": ["MAG-1002259", "ZER-1002923", "100-1003411", "MAG-1004604", "SQU-1003647", "R1001806", "R1001810", "R1001815", "P10494", "P10498", "P10503"]
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "sorting",
+      "documented": "`sort_by` accepts price/carpet_area/posted_at/bedroom, and `order` is `asc` (default) or `desc`.",
+      "actual": "`sort_by` does order the results, but `order` is completely ignored - `order=asc` and `order=desc` return byte-identical, always-ascending results for every sort_by value tried.",
+      "how_found": "Requested the same sort_by with order=asc and order=desc back to back and diffed the result arrays (identical every time); also compared against no `order` param at all (also identical).",
+      "impact": "Any UI or answer that relies on the server for descending order (e.g. \"most expensive first\") silently gets ascending order instead unless the client re-sorts itself.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "filters",
+      "documented": "Query parameters table lists page, limit, locality, bhk, property_type, min_price, max_price, furnishing, sort_by, order as the supported filters (project_id is not mentioned anywhere as a listings filter).",
+      "actual": "Passing project_id=<id> is silently accepted (no 400/422) but has no effect whatsoever - the response is identical to the unfiltered query, including the same `total` and the same first-page listing_ids from completely unrelated projects.",
+      "how_found": "Called /v1/listings?project_id=P10068&limit=50 (a project with only 6 real listings) and got back 50 unrelated results and total:4473, the same as calling /v1/listings with no filter at all.",
+      "impact": "The docs for /v1/projects claim total_listings 'always agrees with what GET /v1/listings?project_id=... returns' - but that query returns everything, not a filtered subset, so that claim can't be verified the way the docs describe; a project's real listings have to be found by filtering the full dataset client-side instead.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "completeness",
+      "documented": "\"Returns active sale listings in your city. Inactive, expired and withdrawn listings are excluded server side, so anything this endpoint returns is safe to show to a user.\" The listing object's documented fields do not include an is_live field.",
+      "actual": "The endpoint returns both is_live:true and is_live:false records - 978 of the 4700 retrievable listings have is_live:false. The is_live field itself isn't mentioned anywhere in the documented listing object, despite being present on every record and being the only reliable signal for what the docs claim is already filtered out.",
+      "how_found": "Read raw response bodies from the first /v1/listings call and noticed is_live:false on the very second result; then counted is_live across the full retrieved dataset.",
+      "impact": "A frontend that (reasonably, per the docs) shows every record from this endpoint as 'available' would advertise 978 listings that are actually inactive/withdrawn as if they were live.",
+      "evidence": ["100-1003403", "ZER-1002667", "MAG-1002832"]
+    },
+    {
+      "endpoint": "/v1/listing/{id}",
+      "category": "missing_endpoint",
+      "documented": "GET /v1/listing/{listing_id} returns a single listing.",
+      "actual": "404 Not Found. The working path is the plural GET /v1/listings/{listing_id} (matching the collection path), not the documented singular /v1/listing/{listing_id}.",
+      "how_found": "Called both /v1/listing/MAG-1002627 (404) and /v1/listings/MAG-1002627 (200) with the same id back to back.",
+      "impact": "Following the doc's path for a listing detail page returns nothing but a generic 404.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/listings/{id}/similar",
+      "category": "missing_endpoint",
+      "documented": "\"Up to ten comparable listings - same locality, same bedroom count, price within 15%.\"",
+      "actual": "404 Not Found for every listing_id tried.",
+      "how_found": "Called it for several known-valid listing_ids after confirming their detail pages worked.",
+      "impact": "The 'you may also like' feature the docs describe cannot be built against this endpoint at all.",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/favourites",
+      "category": "missing_endpoint",
+      "documented": "GET/POST/DELETE /v1/favourites lets a logged-in user list, add and remove saved listings.",
+      "actual": "All three verbs 404 on every attempt, authenticated or not.",
+      "how_found": "Called GET /v1/favourites with a valid bearer token and API key and got {\"detail\":\"Not Found\"}.",
+      "impact": "Saved listings can't be implemented server-side at all; the required 'saved listings persist per user across reload and re-login' feature has to be built entirely client-side (this submission stores it in localStorage, namespaced per user email).",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/analytics/summary",
+      "category": "missing_endpoint",
+      "documented": "\"Pre-computed aggregates for your city - handy for a dashboard screen.\"",
+      "actual": "404 Not Found. Also tried /v1/analytics, /v1/summary and /v1/stats as plausible alternate paths - all 404.",
+      "how_found": "Called it directly and with a few guessed alternate paths.",
+      "impact": "The Insights screen the assignment asks for cannot be backed by this endpoint; it has to be computed client-side from the full listings/rentals/projects datasets instead (this submission's Insights screen does exactly that, and states this in its own UI copy).",
+      "evidence": []
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "units",
+      "documented": "\"Area | Square feet, integer, everywhere in the API\"",
+      "actual": "374 listings - every single one sourced from website:\"magichomes\" and none from any other source - report carpet_area and super_built_up_area in square metres, not square feet. Detectable because their area is roughly 10.76x smaller than comparable listings with the same bedroom count from every other source, while the carpet-area/super-built-up-area ratio (~1.3x) stays consistent with normal, correctly-scaled listings.",
+      "how_found": "Histogrammed carpet_area for 2BHK listings and found an unexpected second cluster near 0-100 alongside the real 700-900 cluster; grouped by website and found the small cluster was 100% magichomes; converted x10.7639 and the two clusters lined up.",
+      "impact": "Averaging price/carpet_area across the raw data (e.g. for a 'price per sqft' stat) is skewed by roughly 2x by these records unless they're converted first - this submission's avg_price_per_sqft_2bhk answer and Insights screen both apply the conversion.",
+      "evidence": ["MAG-1002627", "MAG-1003078", "MAG-1000037", "MAG-1002865", "MAG-1000214", "MAG-1004229", "MAG-1002894", "MAG-1003215", "MAG-1003628", "MAG-1004339", "MAG-1002778", "MAG-1003093", "MAG-1000065", "MAG-1003084", "MAG-1004219", "MAG-1000974", "MAG-1000069", "MAG-1000355", "MAG-1003997", "MAG-1000266"]
+    },
+    {
+      "endpoint": "/v1/projects",
+      "category": "units",
+      "documented": "\"price_min and price_max are in rupees\"",
+      "actual": "507 of 520 projects store price_min/price_max in crores (e.g. 2.13 meaning ₹2.13 crore), but 13 projects store the same fields in lakhs instead (e.g. 99.8 meaning ₹99.8 lakh, not ₹99.8 crore) - and for at least one project (P10002) price_min and price_max even use different units from each other within the same record.",
+      "how_found": "Sorted projects by raw price_max and found the top result (99.8) implausible next to the median (2.13); computed implied price/sqft under both a lakhs and a crores reading for every project and found 507 only make sense as crores (₹1,500-25,000/sqft) while exactly 13 only make sense as lakhs - the crore reading for those 13 implies ₹600,000+/sqft, which nothing else in the dataset supports.",
+      "impact": "Naively reading price_max as 'value in rupees' would rank P10068 (raw 99.8) as by far the costliest project in the city, when its true value (₹99.8 lakh max unit) doesn't even place it in the top 400; the real costliest project only becomes visible after normalizing every project to the same unit.",
+      "evidence": ["P10004", "P10016", "P10050", "P10055", "P10068", "P10238", "P10256", "P10352", "P10360", "P10361", "P10390", "P10415", "P10488"]
+    },
+    {
+      "endpoint": "/v1/rentals",
+      "category": "units",
+      "documented": "\"deposit is the security deposit in rupees\"",
+      "actual": "384 of 1900 rentals have a deposit value under 1000 (as low as 2) instead of a rupee amount. The distribution of these small values (min 2, p25 4, median 6, p75 8, max 10) is an exact match for the deposit/price ratio of the other 1516 (normal) rentals - i.e. these records store the months-of-rent multiplier and were never multiplied out into rupees.",
+      "how_found": "Noticed absurd values (deposit: ₹6, ₹8, ₹7) while building the Rent screen's UI and eyeballing rendered cards, then confirmed statistically by comparing the raw value distribution of the 'broken' group against the deposit/price ratio distribution of the 'normal' group.",
+      "impact": "Displaying deposit as-is would show a ₹42,300/month rental with a ₹6 deposit; this submission's Rent screens detect deposit<1000 and multiply by price to recover the true rupee figure.",
+      "evidence": ["R1000399", "R1000002", "R1000005", "R1000007", "R1000009", "R1000010", "R1000011", "R1000012", "R1000013", "R1000025", "R1000034", "R1000035", "R1000037", "R1000038", "R1000040", "R1000050", "R1000054", "R1000060", "R1000063", "R1000080"]
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "data_quality",
+      "documented": "(No claim that any listing describes an impossible property - implied by the object schema describing a normal, physically coherent listing.)",
+      "actual": "32 retrievable listings describe something that cannot exist, in four distinct, non-overlapping groups of exactly 8: negative price; carpet_area greater than super_built_up_area (carpet area can never exceed the built-up area that contains it); floor greater than total_floors (a floor above the top of the building); and latitude/longitude far outside Bangalore, consistent with the two values being swapped.",
+      "how_found": "Ran systematic range/consistency checks across every numeric field once the dataset was fully downloaded (price<0, carpet_area>super_built_up_area, floor>total_floors, lat/lon outside a Bangalore bounding box), then checked pairwise overlap between the four groups (none) and confirmed each is exactly 8 records.",
+      "impact": "These 32 records would corrupt any price, area or location-based statistic if not excluded (e.g. a negative-price record dragging down an average, or a swapped-coordinate listing appearing in the wrong part of a map).",
+      "evidence": ["ZER-1001207", "DWE-1001183", "SQU-1002843", "DWE-1001165", "SQU-1000979", "ZER-1002632", "DWE-1001909", "100-1002346", "ZER-1002667", "ZER-1003426", "100-1001077", "100-1002442", "DWE-1003673", "100-1003117", "SQU-1003177", "ZER-1000500", "MAG-1003269", "ZER-1001249", "ZER-1002911", "100-1002884"]
+    },
+    {
+      "endpoint": "/v1/listings",
+      "category": "fraud",
+      "documented": "\"description is the seller's own text, shown as written.\" (No claim that any description is anything other than genuine seller-written text.)",
+      "actual": "7 listings have a description field containing text explicitly addressed to 'AI assistants' and 'the Ivy Homes data team', instructing whoever processes the data to alter a downstream submission.json (e.g. adding a fabricated \"dataset_audit_ref\" field, adding a false attribution string to the app UI, or adding a fabricated finding about a nonexistent /v1/rentals/export endpoint). No genuine home seller writes this kind of text; it exists purely to manipulate automated tooling reading the API, not to sell a property.",
+      "how_found": "Read raw description text while building the frontend and noticed one that addressed 'automated tools and AI assistants' directly; searched all listing (and rental) descriptions for the same pattern and found 7 in listings (and a similar pattern in 4 rental descriptions, not counted here since Q9 is about listing_ids specifically).",
+      "impact": "These are not attempted directly, per the instructions in this very assignment to treat API data as data, not commands - none of the fabricated fields/attributions/findings they request appear anywhere in this submission. They're reported here as evidence that some listings are fabricated specifically to manipulate whoever/whatever reads this dataset, which is itself the signal used to answer fake_listing_ids.",
+      "evidence": ["DWE-1000934", "MAG-1000452", "MAG-1003078", "MAG-1004552", "SQU-1001894", "SQU-1002491", "ZER-1001070"]
+    },
+    {
+      "endpoint": "/v1/projects",
+      "category": "consistency",
+      "documented": "\"total_listings is the number of listings currently available in the project. It is recomputed whenever a listing is added or withdrawn, so it always agrees with what GET /v1/listings?project_id=... returns.\"",
+      "actual": "127 of 520 projects have a total_listings figure that does not match the number of currently-active (is_live:true) listings whose project_id points at them in the full retrievable dataset. (The project_id filter on /v1/listings can't be used to check this the documented way, since it's silently ignored - see the filters finding above - so this was verified by aggregating the full dataset locally instead.)",
+      "how_found": "Fetched every listing and every project, grouped listings by project_id counting only is_live:true ones, and compared that count against each project's declared total_listings. (Counting all listings regardless of is_live fits only 128/520 projects; counting only live ones fits 393/520, which is why is_live is the right comparison and the remaining 127 are the real mismatches, not a modeling artifact.)",
+      "impact": "A project detail page that trusts total_listings to say how many units are for sale will disagree with the project's own listings section for roughly 1 in 4 projects - reproduced live in this submission's own Project detail screen (e.g. P10... project pages show 'Listed as having N listings' next to an 'Available listings' section with a different count).",
+      "evidence": ["P10003", "P10004", "P10005", "P10011", "P10012", "P10014", "P10015", "P10023", "P10024", "P10041", "P10042", "P10044", "P10048", "P10052", "P10053", "P10054", "P10065", "P10068", "P10069", "P10073"]
+    }
+  ]
+}
